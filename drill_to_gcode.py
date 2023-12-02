@@ -1,3 +1,4 @@
+import math
 import sys
 from scanf import scanf
 import re
@@ -13,7 +14,7 @@ import DTM_log
 spindle_speed = 20000  # обороты шпинделя
 d_frezy = 0.8  # диаметр фрезы
 start_point = [0, 0]  # начальная точка
-g0_speed = 1000  # скорость свободного перемещения
+g0_speed = 100  # 1000  # скорость свободного перемещения
 g1_speed = 300  # рабочая скорость
 g1_tool_speed = 60  # скорость врезания
 plunge_height = 0.1  # высота слоя врезания
@@ -53,6 +54,7 @@ def check_files(files):
 
 
 def convert_to_points(points_str_lines):
+    global Drill_files_Points
     metric_flag = False
     delim_num = 1
     tools = {}
@@ -85,7 +87,7 @@ def convert_to_points(points_str_lines):
                 points.append([X0/delim_num, Y0/delim_num, tools[active_tool]])
     if not metric_flag:
         DTM_log.printLog(f"Warning! NON-METRIC.")
-    Drill_files_Points.append(points)
+    Drill_files_Points += points
 
 
 def load_file(fpath):
@@ -136,26 +138,67 @@ def gen_circle_gcode(point):
     return gc
 
 
+def optim_points():
+    global Drill_files_Points
+    # Drill_files_Points.sort(key=lambda p: p[0]) #сначала отсортируем слева на право
+    x_elem = [elem[0] for elem in Drill_files_Points]
+    y_elem = [elem[1] for elem in Drill_files_Points]
+    x_min = min(x_elem)
+    x_max = max(x_elem)
+    y_min = min(y_elem)
+    y_max = max(y_elem)
+    dp_sec = {}
+    # размер сетки для разбиения
+    x_delim = 4
+    y_delim = 4
+    # инициализируем массив
+    for i in range(x_delim*y_delim):
+        dp_sec[i] = []
+    # считаем длину разделителей
+    x_d = math.ceil((x_max-x_min)/x_delim)
+    y_d = math.ceil((y_max-y_min)/y_delim)
+    for elem in Drill_files_Points:
+        ix = (elem[0]-x_min)//x_d  # вычисляем клетку по х
+        iy = (elem[1]-y_min)//y_d  # вычисляем клетку по у
+        index = y_delim * ix+iy  # вычисляем координаты клетки (х, у)
+        dp_sec[index].append(elem)  # кладем точку в соответствующую клетку
+
+    for i in range(x_delim*y_delim):
+        if i//y_delim % 2:
+            k = 1.9
+        else:
+            k = 0.1
+        dp_sec[i].sort(key=lambda p: (p[0] - (x_min+((x_d/2)*(i % x_delim))))
+                       ** 2 + (p[1] - (y_min+((y_d/2)*(i//y_delim))*k))**2)
+
+    Drill_files_Points = []
+    for i in range(x_delim):
+        ri = range(y_delim)
+        if i % 2:
+            ri = reversed(ri)
+        for j in ri:
+            Drill_files_Points += dp_sec[i*y_delim+j]
+
+
 def convert_to_gcode():
     DTM_log.printLog("Start convert to gcode")
     GCode = Start_GCode.format(
         spindle_speed, safe_Z, g0_speed, start_point[0], start_point[1])+'\n'
-    for dfp in Drill_files_Points:
-        gc = ""
-        for p in dfp:
-            gc += f"G0 X{p[0]} Y{p[1]} F{g0_speed}\n"
-            gc += f"G1 Z{safe_Z-WpTn_Z-Null_Z} F{g1_speed}\n"
-            if len(p) == 5:
-                # это линия
-                gc += "; line\n"
-                gc += gen_line_gcode(p)
-            else:
-                gc += "; circle\n"
-                gc += gen_circle_gcode(p)
-            gc += f"G1 Z{safe_Z-WpTn_Z-Null_Z} F{g1_speed}\n"
-            gc += f"G0 Z{safe_Z}\n"
-            gc += "; next\n"
-        GCode += gc
+    # sort
+    optim_points()
+    for p in Drill_files_Points:
+        GCode += f"G0 X{p[0]} Y{p[1]} F{g0_speed}\n"
+        GCode += f"G1 Z{safe_Z-WpTn_Z-Null_Z} F{g1_speed}\n"
+        if len(p) == 5:
+            # это линия
+            GCode += "; line\n"
+            GCode += gen_line_gcode(p)
+        else:
+            GCode += "; circle\n"
+            GCode += gen_circle_gcode(p)
+        GCode += f"G1 Z{safe_Z-WpTn_Z-Null_Z} F{g1_speed}\n"
+        GCode += f"G0 Z{safe_Z}\n"
+        GCode += "; next\n"
     GCode += End_GCode
     return GCode
 
