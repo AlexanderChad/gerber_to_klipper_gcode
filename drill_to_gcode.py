@@ -149,8 +149,8 @@ def optim_points():
     y_max = max(y_elem)
     dp_sec = {}
     # размер сетки для разбиения
-    x_delim = 4
-    y_delim = 4
+    x_delim = 10
+    y_delim = 10
     # инициализируем массив
     for i in range(x_delim*y_delim):
         dp_sec[i] = []
@@ -160,16 +160,18 @@ def optim_points():
     for elem in Drill_files_Points:
         ix = (elem[0]-x_min)//x_d  # вычисляем клетку по х
         iy = (elem[1]-y_min)//y_d  # вычисляем клетку по у
-        index = y_delim * ix+iy  # вычисляем координаты клетки (х, у)
+        index = ix+x_delim * iy  # вычисляем координаты клетки (х, у)
         dp_sec[index].append(elem)  # кладем точку в соответствующую клетку
 
     for i in range(x_delim*y_delim):
-        if i//y_delim % 2:
-            k = 1.9
+        if i//x_delim % 2:
+            k = 0.3
         else:
-            k = 0.1
-        dp_sec[i].sort(key=lambda p: (p[0] - (x_min+((x_d/2)*(i % x_delim))))
-                       ** 2 + (p[1] - (y_min+((y_d/2)*(i//y_delim))*k))**2)
+            k = 0.7
+        #k = 0.5
+        cx = x_min+(x_d/2)+(x_d*(i % x_delim))
+        cy = y_min+(y_d*k)+(y_d*(i//x_delim))
+        dp_sec[i].sort(key=lambda p: ((p[0] - cx)**2 + (p[1] - cy)**2))
 
     Drill_files_Points = []
     for i in range(x_delim):
@@ -177,7 +179,7 @@ def optim_points():
         if i % 2:
             ri = reversed(ri)
         for j in ri:
-            Drill_files_Points += dp_sec[i*y_delim+j]
+            Drill_files_Points += dp_sec[i+j*x_delim]
 
 
 def convert_to_gcode():
