@@ -1,4 +1,5 @@
 import math
+import re
 import sys
 from scanf import scanf
 import os.path
@@ -9,21 +10,22 @@ import time
 spindle_speed = 20000  # обороты шпинделя
 d_frezy = 0.8  # диаметр фрезы
 start_point = [0, 0]  # начальная точка
-g0_speed = 100  # 1000  # скорость свободного перемещения
+g0_speed = 1000  # скорость свободного перемещения
 g1_speed = 300  # рабочая скорость
 g1_tool_speed = 60  # скорость врезания
 plunge_height = 0.1  # высота слоя врезания
 safe_Z = 5  # безопасная высота
 Null_Z = 0.5  # конечная высота сверловки
 WpTn_Z = 2.0  # высота (толщина) заготовки
-dr_dopusk = 0.1  # допуск в мм для отверстий
+dr_dopusk = 0.3  # допуск в мм для отверстий
 #####################################################
 
 # файлы с данными
-Drill_files_path = ["files/Drill_NPTH_Through.DRL",
-                    "files/Drill_PTH_Through.DRL", "files/Drill_PTH_Through_Via.DRL"]
+Drill_files_path = ["files/Drill_NPTH_Through.DRL", "files/Drill_PTH_Through.DRL",
+                    "files/Drill_PTH_Through_Via.DRL", "files/Gerber_BoardOutlineLayer.GKO"]
 # точки (действия), извлеченные из файлов
 Drill_files_Points = []
+Box_Points = []
 
 # стартовый код
 Start_GCode = """
@@ -72,14 +74,14 @@ def convert_to_points(points_str_lines):
         # if psl == "M48" or psl == "G05" or psl == "G90" or psl == "M30":
         #    continue
         # tool
-        if psl[0] == 'T':  # инструмент
+        elif psl[0] == 'T':  # инструмент
             # запоминаем номер активного
             active_tool = int(scanf("T%2d", psl)[0])
             if not scanf("C%f", psl) == None:  # если это установка параметров инструмента
                 # запоминаем диаметр фрезы
                 tools[active_tool] = float(scanf("C%f", psl)[0])
         # points
-        if psl[0] == 'X':
+        elif psl[0] == 'X':
             # мы в действии, определяем, точка или линия
             if "G85" in psl:
                 # линия
@@ -100,6 +102,50 @@ def convert_to_points(points_str_lines):
     Drill_files_Points += points
 
 
+# конвертируем в контур платы
+def convert_to_box(points_str_lines):
+    global Box_Points  # сюда будем складывать все точки контура
+    tools = {}  # инструменты
+    active_tool = 0  # активный инструмент
+    metric_flag = False  # флаг, что данные в файле метрические
+    points = []  # точки
+    # масштаб, если 1000, а в файле 12560, то это значит 12.56 мм
+    delim_num_x = 1
+    delim_num_y = 1
+    # перебираем строки
+    for psl in points_str_lines:
+        if "G04" in psl[:3]:
+            continue
+        elif "%FSLAX" in psl:
+            delim_num_x, delim_num_y = scanf("%FSLAX%2dY%2d*%", psl)
+            delim_num_x = 10**(delim_num_x % 10)
+            delim_num_y = 10**(delim_num_y % 10)
+        # metric flag
+        elif "%MOMM*%" in psl:
+            metric_flag = True
+        elif "%ADD" in psl:
+            num_tool, tool_param = scanf("%ADD%2dC,%f*%", psl)
+            # запоминаем
+            tools[num_tool] = tool_param
+        elif psl[0] == 'D':
+            active_tool = scanf("D%2d*", psl)[0]
+        elif "D02*" == psl[-4:]:
+            x0, y0 = scanf("X%dY%dD02*", psl)
+            x0 /= delim_num_x
+            y0 /= delim_num_y
+        elif "D01*" == psl[-4:]:
+            ss = re.split('X|Y|D', psl)
+            x = int(ss[1])
+            y = int(ss[2])
+            points.append([x/delim_num_x, y/delim_num_y, tools[active_tool]])
+    # если флаг метрических данных не был установлен, то это плохо
+    if not metric_flag:
+        # обойдемся предупреждением
+        DTM_log.printLog(f"Warning! NON-METRIC.")
+    # запоминаем полученные точки
+    Box_Points += points
+
+
 # загрузка файла
 def load_file(fpath):
     DTM_log.printLog(f"Load file: {fpath}")
@@ -108,13 +154,18 @@ def load_file(fpath):
     p_l = []  # сюда будем складывать строки
     for p_line in p_s:  # перебираем строки
         pls = p_line.rstrip()  # убираем лишнее
-        if pls[0] == ';' or pls[0] == '%':  # комментарии сразу отбрасываем
+        if len(pls) == 0:  # пропускаем пустые
+            continue
+        if pls[0] == ';':  # комментарии сразу отбрасываем
             continue
         # складываем команды без переноса в конце
         p_l.append(p_line.replace('\n', ''))
     f_p.close  # закрываем файл
     DTM_log.printLog("Collect data")
-    convert_to_points(p_l)  # конвертируем в точки (действия)
+    if ".GKO" in fpath:
+        convert_to_box(p_l)
+    else:
+        convert_to_points(p_l)  # конвертируем в точки (действия)
 
 
 # загружаем файлы
@@ -125,8 +176,9 @@ def load_files(files):
 
 
 def gen_line_gcode(point):
-    gc = f"G1 X{point[0]} Y{point[1]} F{g1_speed}\n"
+    gc = "; No implementation\n"
     if abs(point[-1]-d_frezy) <= dr_dopusk:
+        gc = f"G1 X{point[0]} Y{point[1]} F{g1_speed}\n"
         zp = safe_Z-WpTn_Z-Null_Z
         while (zp > Null_Z):
             gc += f"G1 Z{zp} F{g1_tool_speed}\n"
@@ -134,34 +186,51 @@ def gen_line_gcode(point):
             zp = round(zp-plunge_height, 3)
             gc += f"G1 Z{zp} F{g1_tool_speed}\n"
             gc += f"G1 X{point[0]} Y{point[1]} F{g1_speed}\n"
-    else:
+    elif point[-1] >= d_frezy:  # если диаметр фрезы меньше диаметра отверстия
+        gc = ""
         # запоминаем рабочий радиус с учетом диаметра фрезы
         new_r = (point[-1]-d_frezy)/2
         # отводим инструмент к точке врезания
-        gc = f"G1 X{point[0]+new_r} Y{point[1]} F{g1_speed}\n"
+        # gc = f"G1 X{point[0]+new_r} Y{point[1]} F{g1_speed}\n"
         start_angle = math.atan2(
             point[1]-point[3], point[0]-point[2])-(math.pi/2)
         end_angle = math.pi + start_angle
-        for ia, next_angle in enumerate([start_angle, end_angle]):
-            for i in range(6):  # преобразуем круг в многоугольник
-                # считаем кординаты следующей точки по х
-                next_x = round(
-                    new_r*math.cos((i+1)*math.pi/6+next_angle)+point[ia*2], 3)
-                # считаем кординаты следующей точки по у
-                next_y = round(
-                    new_r*math.sin((i+1)*math.pi/6+next_angle)+point[ia*2+1], 3)
-                if (i == 0):  # если первый заход
-                    # задаем скорость резки
-                    gc += f"G1 X{next_x} Y{next_y} F{g1_speed}\n"
-                else:
-                    gc += f"G1 X{next_x} Y{next_y}\n"  # режем по контуру
-            if ia==0:
-                gc += f"G1 X{round(new_r*math.cos((i+1)*math.pi/6+next_angle)+point[0], 3)} Y{round(new_r*math.sin((i+1)*math.pi/6+next_angle)+point[3], 3)}\n"  # дорезаем по контуру
-            elif ia==1:
-                gc += f"G1 X{round(new_r*math.cos((i+1)*math.pi/6+next_angle)+point[2], 3)} Y{round(new_r*math.sin((i+1)*math.pi/6+next_angle)+point[1], 3)}\n"  # дорезаем по контуру
-        gc += f"G1 X{point[0]+new_r} Y{point[1]}\n"  # дорезаем по контуру
-        gc += "; No implementation\n"
-        DTM_log.printLog(f"Warning! No implementation.")
+        # точка начала контура
+        start_x = 0
+        start_y = 0
+        # мы на этой высоте (начало всегда с нее)
+        zp = safe_Z-WpTn_Z-Null_Z
+        # повторяем резку пока не достигнем высоты конца
+        while (zp > Null_Z):
+            # опускаемся на следующий слой
+            zp = round(zp-plunge_height, 3)
+            gc += f"G1 Z{zp} F{g1_tool_speed}\n"
+            # обрабатываем концы
+            for ia, next_angle in enumerate([start_angle, end_angle]):
+                # преобразуем круг в многоугольник
+                for i in range(7):
+                    # считаем кординаты следующей точки по х
+                    next_x = round(
+                        new_r*math.cos(i*math.pi/6+next_angle)+point[ia*2], 3)
+                    # считаем кординаты следующей точки по у
+                    next_y = round(
+                        new_r*math.sin(i*math.pi/6+next_angle)+point[ia*2+1], 3)
+                    if (i == 0):  # если первый заход
+                        # задаем скорость резки
+                        gc += f"G1 X{next_x} Y{next_y} F{g1_speed}\n"
+                        # если сторона начала
+                        if ia == 0:
+                            # запоминаем точку начала контура
+                            start_x = next_x
+                            start_y = next_y
+                    else:
+                        gc += f"G1 X{next_x} Y{next_y}\n"  # режем по контуру
+            # дорезаем до начала контура
+            gc += f"G1 X{start_x} Y{start_y}\n"
+        gc += "; tested\n"  # пока это тестовая функция
+    else:
+        gc += "; No implementation. Very small line.\n"
+        DTM_log.printLog(f"Warning! No implementation. Very small line.")
     return gc
 
 
@@ -251,6 +320,32 @@ def optim_points():
             Drill_files_Points += dp_sec[i+j*x_delim]
 
 
+# генерируем рез контура платы
+def gen_box_gcode():
+    # перемещаемся к точке начала
+    gc = f"G0 X{Box_Points[0][0]} Y{Box_Points[0][1]} F{g0_speed}\n"
+    # опускаемся с безопасной высоты на рабочую
+    gc += f"G1 Z{safe_Z-WpTn_Z-Null_Z} F{g1_speed}\n"
+    zp = safe_Z-WpTn_Z-Null_Z  # мы на этой высоте (начало всегда с нее)
+    while (zp >= Null_Z):  # повторяем резку пока не достигнем высоты конца
+        gc += f"G1 Z{zp} F{g1_tool_speed}\n"  # врезаемся
+        # высчитываем следующую высоту прохода
+        zp = round(zp-plunge_height, 3)
+        for i, bp in enumerate(Box_Points):
+            if (i == 0):  # если первый заход
+                # задаем скорость резки
+                gc += f"G1 X{bp[0]} Y{bp[1]} F{g1_speed}\n"
+            else:
+                gc += f"G1 X{bp[0]} Y{bp[1]}\n"  # режем по контуру
+        gc += f"G1 X{Box_Points[0][0]} Y{Box_Points[0][1]}\n"
+    # поднимаем инструмент над рабочей поверхностью
+    gc += f"G1 Z{safe_Z-WpTn_Z-Null_Z} F{g1_speed}\n"
+    # поднимаем на безопасную для перемещения высоту
+    gc += f"G0 Z{safe_Z} F{g0_speed}\n"
+    gc += "; tested\n"  # пока это тестовая функция
+    return gc
+
+
 # конвертируем в gcode
 def convert_to_gcode():
     DTM_log.printLog("Start convert to gcode")
@@ -281,6 +376,8 @@ def convert_to_gcode():
         GCode += f"G0 Z{safe_Z} F{g0_speed}\n"
         # переходим к следующей точке
         GCode += "; next\n"
+    # генерируем рез контура платы
+    GCode += gen_box_gcode()
     # добавляем завершающий gcode
     GCode += End_GCode
     # возвращаем сгенерированный
