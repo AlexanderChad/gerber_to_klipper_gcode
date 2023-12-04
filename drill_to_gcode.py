@@ -9,7 +9,7 @@ import time
 #####################################################
 spindle_speed = 20000  # обороты шпинделя
 d_frezy = 0.8  # диаметр фрезы
-start_point = [0, 0]  # начальная точка
+start_point = [20, 20]  # начальная точка
 g0_speed = 1000  # скорость свободного перемещения
 g1_speed = 300  # рабочая скорость
 g1_tool_speed = 60  # скорость врезания
@@ -17,7 +17,7 @@ plunge_height = 0.1  # высота слоя врезания
 safe_Z = 5  # безопасная высота
 Null_Z = 0.5  # конечная высота сверловки
 WpTn_Z = 2.0  # высота (толщина) заготовки
-dr_dopusk = 0.3  # допуск в мм для отверстий
+dr_dopusk = 0.2  # допуск в мм для отверстий
 #####################################################
 
 # файлы с данными
@@ -43,15 +43,13 @@ M84 X Y E
 """
 
 
-# проверяем, что необходимые файлы присутствуют
-def check_files(files):
-    DTM_log.printLog("Check files")
-    for file in files:
-        if os.path.isfile(file):
-            DTM_log.printLog(f"Check file: {file} exists.")
-        else:
-            DTM_log.printLog(f"Check file: {file} does not exist.")
-            return False
+# проверяем, что файл присутствует
+def check_file(file):
+    if os.path.isfile(file):
+        DTM_log.printLog(f"Check file: {file} exists.")
+    else:
+        DTM_log.printLog(f"Check file: {file} does not exist.")
+        return False
     return True
 
 
@@ -102,6 +100,7 @@ def convert_to_points(points_str_lines):
     Drill_files_Points += points
 
 
+# https://www.ucamco.com/files/downloads/file_en/436/gerber-layer-format-specification-revision-2021-04_en.pdf
 # конвертируем в контур платы
 def convert_to_box(points_str_lines):
     global Box_Points  # сюда будем складывать все точки контура
@@ -109,6 +108,7 @@ def convert_to_box(points_str_lines):
     active_tool = 0  # активный инструмент
     metric_flag = False  # флаг, что данные в файле метрические
     points = []  # точки
+    err_flag = False  # флаг ошибки конвертации
     # масштаб, если 1000, а в файле 12560, то это значит 12.56 мм
     delim_num_x = 1
     delim_num_y = 1
@@ -134,16 +134,23 @@ def convert_to_box(points_str_lines):
             x0 /= delim_num_x
             y0 /= delim_num_y
         elif "D01*" == psl[-4:]:
+            if "I" in psl or "J" in psl:
+                err_flag = True
+                DTM_log.printLog(f"ERROR! Unsupported command.")
+                continue
             ss = re.split('X|Y|D', psl)
             x = int(ss[1])
             y = int(ss[2])
             points.append([x/delim_num_x, y/delim_num_y, tools[active_tool]])
+        if err_flag:
+            break
     # если флаг метрических данных не был установлен, то это плохо
     if not metric_flag:
         # обойдемся предупреждением
         DTM_log.printLog(f"Warning! NON-METRIC.")
-    # запоминаем полученные точки
-    Box_Points += points
+    if not err_flag:
+        # запоминаем полученные точки
+        Box_Points += points
 
 
 # загрузка файла
@@ -171,10 +178,12 @@ def load_file(fpath):
 # загружаем файлы
 def load_files(files):
     DTM_log.printLog("load_files")
-    for file in files:
-        load_file(file)
+    for file in files:  # перебираем файлы
+        if check_file(file):  # если файл существует
+            load_file(file)  # обрабатываем его
 
 
+# генерируем gcode линии
 def gen_line_gcode(point):
     gc = "; No implementation\n"
     if abs(point[-1]-d_frezy) <= dr_dopusk:
@@ -234,7 +243,7 @@ def gen_line_gcode(point):
     return gc
 
 
-# генерируем код отверстия
+# генерируем gcode отверстия
 def gen_circle_gcode(point):
     gc = "; No implementation\n"
     # если не сильно отличается диаметр отверстия от фрезы
@@ -269,16 +278,19 @@ def gen_circle_gcode(point):
     return gc  # возвращаем gcode
 
 
+# получаем экстремумы точек
+def get_ext_points(points):
+    # получаем элементы х и у, а так же их экстремумы
+    x_elem = [elem[0] for elem in points]
+    y_elem = [elem[1] for elem in points]
+    return min(x_elem), max(x_elem), min(y_elem), max(y_elem)
+
+
 # оптимизируем расположение точек (действий)
 def optim_points():
     global Drill_files_Points
-    # получаем элементы х и у, а так же их экстремумы
-    x_elem = [elem[0] for elem in Drill_files_Points]
-    y_elem = [elem[1] for elem in Drill_files_Points]
-    x_min = min(x_elem)
-    x_max = max(x_elem)
-    y_min = min(y_elem)
-    y_max = max(y_elem)
+    # получаем экстремумы
+    x_min, x_max, y_min, y_max = get_ext_points(Drill_files_Points)
     # сюда будем складывать точки по секторам
     dp_sec = {}
     # размер сетки для разбиения
@@ -322,28 +334,87 @@ def optim_points():
 
 # генерируем рез контура платы
 def gen_box_gcode():
+    if len(Box_Points) == 0:
+        return "; err. No box data.\n"
     # перемещаемся к точке начала
     gc = f"G0 X{Box_Points[0][0]} Y{Box_Points[0][1]} F{g0_speed}\n"
     # опускаемся с безопасной высоты на рабочую
-    gc += f"G1 Z{safe_Z-WpTn_Z-Null_Z} F{g1_speed}\n"
+    gc += f"G0 Z{safe_Z-WpTn_Z-Null_Z} F{g0_speed}\n"
+
+    # получаем экстремумы
+    x_min, x_max, y_min, y_max = get_ext_points(Box_Points)
+
+    # а "центры" тогда будут:
+    cx = x_min+(x_max-x_min)/2
+    cy = y_min+(y_max-y_min)/2
+
+    # модифиируем контур под фрезу
+    BP_mod = []
+    # радиус фрезы
+    r_frezy = d_frezy/2
+    for bp in Box_Points:
+        new_x = bp[0]
+        new_y = bp[1]
+        if new_x < cx:  # если левее центра
+            new_x -= r_frezy
+        else:  # если правее центра
+            new_x += r_frezy
+        if new_y < cy:  # если ниже центра
+            new_y -= r_frezy
+        else:  # если выше центра
+            new_y += r_frezy
+        # записываем новые координаты точки контура
+        BP_mod.append([round(new_x, 3), round(new_y, 3)])
+
     zp = safe_Z-WpTn_Z-Null_Z  # мы на этой высоте (начало всегда с нее)
     while (zp >= Null_Z):  # повторяем резку пока не достигнем высоты конца
         gc += f"G1 Z{zp} F{g1_tool_speed}\n"  # врезаемся
         # высчитываем следующую высоту прохода
         zp = round(zp-plunge_height, 3)
-        for i, bp in enumerate(Box_Points):
+        for i, bp in enumerate(BP_mod):
             if (i == 0):  # если первый заход
                 # задаем скорость резки
                 gc += f"G1 X{bp[0]} Y{bp[1]} F{g1_speed}\n"
             else:
                 gc += f"G1 X{bp[0]} Y{bp[1]}\n"  # режем по контуру
-        gc += f"G1 X{Box_Points[0][0]} Y{Box_Points[0][1]}\n"
+        gc += f"G1 X{BP_mod[0][0]} Y{BP_mod[0][1]}\n"
     # поднимаем инструмент над рабочей поверхностью
     gc += f"G1 Z{safe_Z-WpTn_Z-Null_Z} F{g1_speed}\n"
     # поднимаем на безопасную для перемещения высоту
     gc += f"G0 Z{safe_Z} F{g0_speed}\n"
     gc += "; tested\n"  # пока это тестовая функция
     return gc
+
+
+# вносим корректировку в расположение точек на плоскости
+# проще говоря подгоняем левый нижний угол платы под координаты точки start_point
+def adjust_location():
+    global Drill_files_Points, Box_Points
+    DTM_log.printLog("Start adjust location")
+    if len(Box_Points) == 0:
+        DTM_log.printLog("Warning! No box data.")
+        # получаем экстремумы
+        x_min, _, y_min, _ = get_ext_points(Drill_files_Points)
+    else:
+        # получаем экстремумы
+        x_min, _, y_min, _ = get_ext_points(Box_Points)
+    # получаем смещение координат
+    delta_point = [start_point[0]-x_min +
+                   d_frezy/2, start_point[1]-y_min+d_frezy/2]
+    # модифицируем координаты
+    for i_bp in range(len(Box_Points)):
+        Box_Points[i_bp][0] = round(Box_Points[i_bp][0]+delta_point[0], 3)
+        Box_Points[i_bp][1] = round(Box_Points[i_bp][1]+delta_point[1], 3)
+    for i_dfp in range(len(Drill_files_Points)):
+        Drill_files_Points[i_dfp][0] = round(
+            Drill_files_Points[i_dfp][0] + delta_point[0], 3)
+        Drill_files_Points[i_dfp][1] = round(
+            Drill_files_Points[i_dfp][1]+delta_point[1], 3)
+        if len(Drill_files_Points[i_dfp]) == 5:  # если это линия
+            Drill_files_Points[i_dfp][2] = round(
+                Drill_files_Points[i_dfp][2] + delta_point[0], 3)
+            Drill_files_Points[i_dfp][3] = round(
+                Drill_files_Points[i_dfp][3]+delta_point[1], 3)
 
 
 # конвертируем в gcode
@@ -358,7 +429,7 @@ def convert_to_gcode():
         # перемещаемся к точке
         GCode += f"G0 X{p[0]} Y{p[1]} F{g0_speed}\n"
         # опускаемся с безопасной высоты на рабочую
-        GCode += f"G1 Z{safe_Z-WpTn_Z-Null_Z} F{g1_speed}\n"
+        GCode += f"G0 Z{safe_Z-WpTn_Z-Null_Z} F{g0_speed}\n"
         # определяем тип точки
         if len(p) == 5:
             # это линия
@@ -370,6 +441,10 @@ def convert_to_gcode():
             GCode += "; circle\n"
             # генерируем код отвертстия
             GCode += gen_circle_gcode(p)
+        # если отверстие меньше двойного диаметра фрезы (отверстие получается без серцевины)
+        if p[-1] < (d_frezy*2):
+            # отводим фрезу от стенки для безопасного подъема
+            GCode += f"G1 X{p[0]} Y{p[1]}\n"
         # поднимаем инструмент над рабочей поверхностью
         GCode += f"G1 Z{safe_Z-WpTn_Z-Null_Z} F{g1_speed}\n"
         # поднимаем на безопасную для перемещения высоту
@@ -395,13 +470,9 @@ def save_gcode(gcode):
 if __name__ == "__main__":
     DTM_log.printLog("Starting...")
 
-    if (check_files(Drill_files_path)):
-        DTM_log.printLog("Check files: OK.")
-    else:
-        DTM_log.printLog("Check files: ERR.")
-        sys.exit()  # завершаем программу
-
     load_files(Drill_files_path)
+
+    adjust_location()
 
     GCode = convert_to_gcode()
 
