@@ -6,16 +6,24 @@ import DTM_log
 
 #####################################################
 spindle_speed = 20000  # обороты шпинделя
-d_frezy = 0.8  # диаметр фрезы
-start_point = [56, 38]  # начальная точка
+d_frezy = 0.8  # 0.8  # диаметр фрезы
+start_point = [129.0, 70.0]  # начальная точка
 g0_speed = 1000  # скорость свободного перемещения
 g1_speed = 300  # рабочая скорость
-g1_tool_speed = 60  # скорость врезания
+g1_tool_speed = 50  # скорость врезания
 plunge_height = 0.1  # высота слоя врезания
 safe_Z = 12  # безопасная высота
 Null_Z = 0.1  # конечная высота сверловки
-WpTn_Z = 4.0  # высота (толщина) заготовки
+WpTn_Z = 2.5  # высота (толщина) заготовки
 dr_dopusk = 0.2  # допуск в мм для отверстий
+# менять направление при резке (должно компенсировать увод фрезы)
+change_cut_dir = False
+# генерировать резку контура
+gen_board_outline = True
+# генерировать сверловку
+gen_drill = True
+# генерировать отверстия методом спирали
+gen_hole_spiral = True
 #####################################################
 
 # файлы с данными
@@ -61,11 +69,13 @@ def convert_to_points(points_str_lines):
     points = []  # точки
     # перебираем строки
     for psl in points_str_lines:
+        # print(psl)
         # metric flag
         if psl[:6] == "METRIC":
             metric_flag = True
             # запоминаем масштаб
-            delim_num = 10**len(psl.split(',')[2].split('.')[1])
+            if psl[7:9] == "TZ":
+                delim_num = 10**len(psl.split(',')[2].split('.')[1])
         # ignore
         # if psl == "M48" or psl == "G05" or psl == "G90" or psl == "M30":
         #    continue
@@ -81,13 +91,13 @@ def convert_to_points(points_str_lines):
             # мы в действии, определяем, точка или линия
             if "G85" in psl:
                 # линия
-                X0, Y0, X1, Y1 = scanf("X%6dY%6dG85X%6dY%6d", psl)
+                X0, Y0, X1, Y1 = scanf("X%fY%fG85X%fY%f", psl)
                 # запоминаем в формате [X0, Y0, X1, Y1, D_Frezy]
                 points.append([X0/delim_num, Y0/delim_num, X1 /
                               delim_num, Y1/delim_num, tools[active_tool]])
             else:
                 # точка
-                X0, Y0 = scanf("X%6dY%6d", psl)
+                X0, Y0 = scanf("X%fY%f", psl)
                 # запоминаем в формате [X0, Y0, D_Frezy]
                 points.append([X0/delim_num, Y0/delim_num, tools[active_tool]])
     # если флаг метрических данных не был установлен, то это плохо
@@ -125,6 +135,8 @@ def convert_to_box(points_str_lines):
             num_tool, tool_param = scanf("%ADD%2dC,%f*%", psl)
             # запоминаем
             tools[num_tool] = tool_param
+            # запоминаем последний (или единственный), как активный
+            active_tool = num_tool
         elif psl[0] == 'D':
             active_tool = scanf("D%2d*", psl)[0]
         elif "D02*" == psl[-4:]:
@@ -241,6 +253,87 @@ def gen_line_gcode(point):
     return gc
 
 
+# генерируем отвестие послойно
+def gen_hole_metod_layers(zp, new_r, point):
+    gc = ''
+    cut_dir = 1  # направление резки, 1 - прямое, -1 - обратное
+    while (zp >= Null_Z):  # повторяем резку пока не достигнем высоты конца
+        gc += f"G1 Z{zp} F{g1_tool_speed}\n"  # врезаемся
+        # высчитываем следующую высоту прохода
+        zp = round(zp-plunge_height, 3)
+        if change_cut_dir:
+            cut_dir *= -1  # меняем направление резки
+        for i in range(12):  # преобразуем круг в многоугольник
+            # считаем кординаты следующей точки по х
+            next_x = round(
+                new_r*math.cos(cut_dir*(i+1)*math.pi/6)+point[0], 3)
+            # считаем кординаты следующей точки по у
+            next_y = round(
+                new_r*math.sin(cut_dir*(i+1)*math.pi/6)+point[1], 3)
+            if (i == 0):  # если первый заход
+                # задаем скорость резки
+                gc += f"G1 X{next_x} Y{next_y} F{g1_speed}\n"
+            else:
+                gc += f"G1 X{next_x} Y{next_y}\n"  # режем по контуру
+    return gc
+
+
+# генерируем отвестие спиралью
+def gen_hole_metod_spiral(zp, new_r, point):
+    gc = ''
+    # сторона многоугольника
+    a_mng = 2.0 * new_r * math.sin(math.pi/12.0)
+    # высота шага
+    z_step = plunge_height/12.0
+    # скорость шага
+    g1_spiral_speed = round(math.hypot(a_mng, z_step)/math.sqrt(((z_step*g1_speed+a_mng*g1_tool_speed)**2)/((g1_speed**2)*(g1_tool_speed**2))))
+    # флаг первой команды на резку
+    first_step = True
+    # количество витков
+    step_loops = math.ceil((zp-Null_Z)/plunge_height)
+    # сколько шагов мы должны пропустить, чтобы придти к `Null_Z`
+    skip_steps = (int)(((step_loops*plunge_height)-(zp-Null_Z))/z_step)
+    # повторяем резку заданное количество циклов для достижения высоты конца
+    for sl in range(step_loops):
+        for i in range(12):  # преобразуем круг в многоугольник
+            # считаем кординаты следующей точки по х
+            next_x = round(
+                new_r*math.cos((i+1)*math.pi/6)+point[0], 3)
+            # считаем кординаты следующей точки по у
+            next_y = round(
+                new_r*math.sin((i+1)*math.pi/6)+point[1], 3)
+            # пропускаем лишние первые шаги
+            if first_step and (i < skip_steps):
+                continue
+            # если первый заход
+            if first_step:
+                # задаем скорость резки
+                gc += f"G1 X{next_x} Y{next_y} Z{round(zp-z_step, 3)} F{g1_spiral_speed}\n"
+                first_step = False
+            else:
+                gc += f"G1 X{next_x} Y{next_y} Z{round(zp-z_step, 3)}\n"  # режем по контуру
+            # высчитываем следующую высоту прохода
+            zp -= z_step
+        # если это последний проход, то дорезаем окружность в плоскости
+        if (sl == (step_loops-1)):
+            first_step = True
+            for i in range(12):  # преобразуем круг в многоугольник
+                # считаем кординаты следующей точки по х
+                next_x = round(
+                    new_r*math.cos((i+1)*math.pi/6)+point[0], 3)
+                # считаем кординаты следующей точки по у
+                next_y = round(
+                    new_r*math.sin((i+1)*math.pi/6)+point[1], 3)
+                if first_step:  # если первый заход
+                    # задаем скорость резки
+                    gc += f"G1 X{next_x} Y{next_y} F{g1_speed}\n"
+                    first_step = False
+                else:
+                    gc += f"G1 X{next_x} Y{next_y}\n"  # режем по контуру
+    gc += "; tested gen_hole_metod_layers()\n"  # пока это тестовая функция
+    return gc
+
+
 # генерируем gcode отверстия
 def gen_circle_gcode(point):
     gc = "; No implementation\n"
@@ -251,24 +344,14 @@ def gen_circle_gcode(point):
         # запоминаем рабочий радиус с учетом диаметра фрезы
         new_r = (point[-1]-d_frezy)/2
         # отводим инструмент к точке врезания
-        gc = f"G1 X{round(point[0]+new_r,3)} Y{point[1]} F{g1_speed}\n"
+        gc = f"G1 X{round(point[0]+new_r, 3)} Y{point[1]} F{g1_speed}\n"
         # gc += f"G1 X{point[0]+new_r} Y{point[1]}\n"#
         zp = WpTn_Z+Null_Z  # мы на этой высоте (начало всегда с нее)
-        while (zp >= Null_Z):  # повторяем резку пока не достигнем высоты конца
-            gc += f"G1 Z{zp} F{g1_tool_speed}\n"  # врезаемся
-            # высчитываем следующую высоту прохода
-            zp = round(zp-plunge_height, 3)
-            for i in range(12):  # преобразуем круг в многоугольник
-                # считаем кординаты следующей точки по х
-                next_x = round(new_r*math.cos((i+1)*math.pi/6)+point[0], 3)
-                # считаем кординаты следующей точки по у
-                next_y = round(new_r*math.sin((i+1)*math.pi/6)+point[1], 3)
-                if (i == 0):  # если первый заход
-                    # задаем скорость резки
-                    gc += f"G1 X{next_x} Y{next_y} F{g1_speed}\n"
-                else:
-                    gc += f"G1 X{next_x} Y{next_y}\n"  # режем по контуру
-        gc += "; tested\n"  # пока это тестовая функция
+        # выбираем генератор
+        if gen_hole_spiral:
+            gc += gen_hole_metod_spiral(zp, new_r, point)
+        else:
+            gc += gen_hole_metod_layers(zp, new_r, point)
     else:  # если отверстие сильно меньше фрезы
         # на всякий случай оставляем без изменений
         gc = "; No implementation. Very small hole.\n"
@@ -287,6 +370,10 @@ def get_ext_points(points):
 # оптимизируем расположение точек (действий)
 def optim_points():
     global Drill_files_Points
+    # если нет точек, то выходим
+    if len(Drill_files_Points) == 0:
+        DTM_log.printLog("Warning! No points for optimization.")
+        return
     # получаем экстремумы
     x_min, x_max, y_min, y_max = get_ext_points(Drill_files_Points)
     # сюда будем складывать точки по секторам
@@ -332,7 +419,11 @@ def optim_points():
 
 # генерируем рез контура платы
 def gen_box_gcode():
+    if not gen_board_outline:
+        DTM_log.printLog("Warning! Gen box disabled.")
+        return "; warn. gen disabled\n"
     if len(Box_Points) == 0:
+        DTM_log.printLog("Warning! No points for gen box.")
         return "; err. No box data.\n"
     # перемещаемся к точке начала
     gc = f"G0 X{Box_Points[0][0]} Y{Box_Points[0][1]} F{g0_speed}\n"
@@ -421,34 +512,35 @@ def convert_to_gcode():
     # добавляем стартовый gcode
     GCode = Start_GCode.format(
         spindle_speed, safe_Z, g0_speed, start_point[0], start_point[1])+'\n'
-    optim_points()  # сортировка точек по приоритетности обработки
-    # создаем gcode для каждой точки
-    for p in Drill_files_Points:
-        # перемещаемся к точке
-        GCode += f"G0 X{p[0]} Y{p[1]} F{g0_speed}\n"
-        # опускаемся с безопасной высоты на рабочую
-        GCode += f"G0 Z{WpTn_Z+Null_Z} F{g0_speed}\n"
-        # определяем тип точки
-        if len(p) == 5:
-            # это линия
-            GCode += "; line\n"
-            # генерируем код линии
-            GCode += gen_line_gcode(p)
-        else:
-            # это отверстие
-            GCode += "; circle\n"
-            # генерируем код отвертстия
-            GCode += gen_circle_gcode(p)
-        # если отверстие меньше двойного диаметра фрезы (отверстие получается без серцевины)
-        if p[-1] < (d_frezy*2):
-            # отводим фрезу от стенки для безопасного подъема
-            GCode += f"G1 X{p[0]} Y{p[1]}\n"
-        # поднимаем инструмент над рабочей поверхностью
-        GCode += f"G1 Z{WpTn_Z+Null_Z} F{g1_speed}\n"
-        # поднимаем на безопасную для перемещения высоту
-        GCode += f"G0 Z{safe_Z} F{g0_speed}\n"
-        # переходим к следующей точке
-        GCode += "; next\n"
+    if gen_drill:
+        optim_points()  # сортировка точек по приоритетности обработки
+        # создаем gcode для каждой точки
+        for p in Drill_files_Points:
+            # перемещаемся к точке
+            GCode += f"G0 X{p[0]} Y{p[1]} F{g0_speed}\n"
+            # опускаемся с безопасной высоты на рабочую
+            GCode += f"G0 Z{WpTn_Z+Null_Z} F{g0_speed}\n"
+            # определяем тип точки
+            if len(p) == 5:
+                # это линия
+                GCode += "; line\n"
+                # генерируем код линии
+                GCode += gen_line_gcode(p)
+            else:
+                # это отверстие
+                GCode += "; circle\n"
+                # генерируем код отвертстия
+                GCode += gen_circle_gcode(p)
+            # если отверстие меньше двойного диаметра фрезы (отверстие получается без серцевины)
+            if p[-1] < (d_frezy*2):
+                # отводим фрезу от стенки для безопасного подъема
+                GCode += f"G1 X{p[0]} Y{p[1]}\n"
+            # поднимаем инструмент над рабочей поверхностью
+            GCode += f"G1 Z{WpTn_Z+Null_Z} F{g1_speed}\n"
+            # поднимаем на безопасную для перемещения высоту
+            GCode += f"G0 Z{safe_Z} F{g0_speed}\n"
+            # переходим к следующей точке
+            GCode += "; next\n"
     # генерируем рез контура платы
     GCode += gen_box_gcode()
     # добавляем завершающий gcode
@@ -468,12 +560,12 @@ def save_gcode(gcode):
 if __name__ == "__main__":
     DTM_log.printLog("Starting...")
 
-    load_files(Drill_files_path)
-
-    adjust_location()
-
-    GCode = convert_to_gcode()
-
-    save_gcode(GCode)
+    if gen_board_outline or gen_drill:
+        load_files(Drill_files_path)
+        adjust_location()
+        GCode = convert_to_gcode()
+        save_gcode(GCode)
+    else:
+        DTM_log.printLog("Set gen_board_outline or gen_drill to True!")
 
     DTM_log.printLog("Exit")

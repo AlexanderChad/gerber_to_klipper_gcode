@@ -9,21 +9,29 @@
 
 <details><summary>Как использовать</summary>  
 
-1. положить в папку `files` файлы: `Drill_NPTH_Through.DRL`, `Drill_PTH_Through.DRL`, `Drill_PTH_Through_Via.DRL`, `Gerber_BoardOutlineLayer.GKO`, если какой-то этап не нужен, просто убрать файл, например, не вырезать плату - убрать `Gerber_BoardOutlineLayer.GKO`  
+1. положить в папку `files` файлы: `Drill_NPTH_Through.DRL`, `Drill_PTH_Through.DRL`, `Drill_PTH_Through_Via.DRL`, `Gerber_BoardOutlineLayer.GKO`, если какой-то этап не нужен, можно убрать файл, но для сохранения абсолютных координат рекомендую отключать через установку `gen_board_outline` и `gen_drill`.  
 2. отредактировать параметры в файле `drill_to_gcode.py` под ваш станок:  
 ```
 #####################################################
 spindle_speed = 20000  # обороты шпинделя
-d_frezy = 0.8  # диаметр фрезы
-start_point = [56, 38]  # начальная точка
+d_frezy = 1.0  # 0.8  # диаметр фрезы
+start_point = [129.0, 70.0]  # начальная точка
 g0_speed = 1000  # скорость свободного перемещения
 g1_speed = 300  # рабочая скорость
-g1_tool_speed = 60  # скорость врезания
+g1_tool_speed = 50  # скорость врезания
 plunge_height = 0.1  # высота слоя врезания
 safe_Z = 12  # безопасная высота
 Null_Z = 0.1  # конечная высота сверловки
-WpTn_Z = 4.0  # высота (толщина) заготовки
+WpTn_Z = 2.5  # высота (толщина) заготовки
 dr_dopusk = 0.2  # допуск в мм для отверстий
+# менять направление при резке (должно компенсировать увод фрезы)
+change_cut_dir = False
+# генерировать резку контура
+gen_board_outline = True
+# генерировать сверловку
+gen_drill = True
+# генерировать отверстия методом спирали
+gen_hole_spiral = True
 #####################################################
 ```  
 3. запустить `drill_to_gcode.py`  
